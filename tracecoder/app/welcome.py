@@ -47,8 +47,8 @@ def welcome_renderable(*, compact: bool = False, particle_frame: int = 0) -> Ali
     if compact:
         return Align.center(
             Text.assemble(
-                ("first", "#81e8bb bold"),
-                ("coder", "#18cfcb bold"),
+                ("Trace", "#81e8bb bold"),
+                ("Coder", "#18cfcb bold"),
                 ("\nlocal coding agent", "#6e6d72"),
             )
         )

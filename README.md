@@ -30,6 +30,8 @@ If you want to understand how coding agents actually work, TraceCoder keeps the 
 - Build on a small Python codebase with clear module boundaries.
 - Use a local coding agent while still being able to inspect how it works.
 
+![TraceCoder planning, requesting permission, and completing a local task](docs/images/tracecoder-demo.png)
+
 ## Why TraceCoder
 
 Most coding-agent demos show the surface: a prompt goes in, code changes come out. TraceCoder focuses on the machinery in between.
@@ -160,6 +162,14 @@ Use `tracecoder --model provider/model` to choose the initial profile for a run.
 TraceCoder's TUI is designed to expose the agent loop instead of hiding it. You can see session state, streamed assistant output, tool calls, tool results, and permission prompts in one place.
 
 Before `write`, `edit`, `apply_patch`, or `delete` changes local files, TraceCoder builds a trusted unified diff with red removals, green additions, per-file statistics, and bounded expansion controls. In standard mode it accompanies the normal permission confirmation; an existing grant or aggressive mode still requires a review-only Apply confirmation. Approve the reviewed operation, deny it, or reply with `reject: <feedback>` so the model can revise the proposed change. TraceCoder rechecks reviewed file snapshots immediately before dispatch and blocks stale operations, reducing accidental overwrites from concurrent changes; this is a guard, not a filesystem-level atomic transaction. In bypass mode the review is shown as a non-blocking event and the operation proceeds immediately; the Harbor adapter disables that event for its non-interactive task turn. Shell commands follow the permission policy for the active mode because arbitrary command effects cannot be precomputed safely.
+
+Ready state:
+
+![TraceCoder ready state](docs/images/tracecoder-ready.png)
+
+Conversation flow:
+
+![TraceCoder conversation flow](docs/images/tui-empty.png)
 
 ## Documentation
 

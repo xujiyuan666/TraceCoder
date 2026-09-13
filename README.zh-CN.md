@@ -30,6 +30,8 @@ TraceCoder 是一个能真实运行的本地 coding agent，带有 Textual TUI�
 - 基于一个模块边界清晰的小型 Python 代码库继续改造。
 - 一边使用本地 coding agent，一边读懂它的内部机制。
 
+![TraceCoder 规划、请求权限并完成本地任务](docs/images/tracecoder-demo.png)
+
 ## 为什么做 TraceCoder
 
 大多数 coding-agent 演示展示的是表面：一个 prompt 进去，代码改完出来。TraceCoder 关注的是中间的机械结构。
@@ -158,6 +160,14 @@ extra_body = { reasoning_summary = "auto" }
 TraceCoder 的 TUI 不是为了把 agent loop 藏起来，而是为了把它展示出来。你可以在一个界面里看到 session 状态、流式输出、工具调用、工具结果和权限请求。
 
 `write`、`edit`、`apply_patch` 或 `delete` 真正修改本地文件前，TraceCoder 会先生成可信的 unified diff：删除行标红、新增行标绿，并显示每个文件的增删统计和有界展开控制。standard 模式中它会随普通权限确认一同展示；已有长期授权或 aggressive 模式也仍需一次仅用于 review 的 Apply 确认。你可以批准本次已预览操作、直接拒绝，或回复 `reject: <反馈>` 让模型按意见重做。TraceCoder 会在调度实际写入前再次核对文件快照并阻止过期预览，这能降低外部并发修改造成的误覆盖风险，但不等同于文件系统级原子事务。bypass 模式不等待确认，但默认仍会发出非阻塞的写前 diff 事件并立即执行；非交互 benchmark adapter 会显式关闭该事件。`shell` 无法安全预计算任意命令的文件影响，因此只遵循当前模式的权限策略。
+
+空闲状态：
+
+![TraceCoder 空闲状态](docs/images/tracecoder-ready.png)
+
+基础对话流：
+
+![TraceCoder 基础对话流](docs/images/tui-empty.png)
 
 ## 文档
 
