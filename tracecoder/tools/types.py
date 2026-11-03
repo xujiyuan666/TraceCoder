@@ -33,7 +33,9 @@ class ToolExecutor(Protocol):
     每个工具最终都是一个接收关键字参数、返回 `ToolResult` 的函数。
     """
 
-    def __call__(self, **kwargs: Any) -> ToolResult: ...
+    def __call__(self, **kwargs: Any) -> ToolResult:
+        """接收已解析的工具参数并返回统一结果；协议本身不执行校验或权限判断。"""
+        ...
 
 
 @dataclass(slots=True)
@@ -64,6 +66,7 @@ class Tool:
 
     @property
     def name(self) -> str:
+        """从模型可见定义读取名称，保证注册、调用和结果使用同一个工具标识。"""
         return self.definition.name
 
 

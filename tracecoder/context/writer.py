@@ -35,11 +35,13 @@ class SessionEventWriter:
     """
 
     def __init__(self, *, store: JsonlSessionStore, session_id: str, current_turn: int = 0) -> None:
+        """绑定单个会话的存储和 turn 计数；所有 append_* 最终都通过此 writer 写事件。"""
         self.store = store
         self.session_id = session_id
         self.current_turn = current_turn
 
     def append_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        """为 payload 分配事件 ID 和时间戳，再交给 store 追加到该 session 的 JSONL。"""
         self.store.append_event(
             SessionEvent(
                 id=new_event_id(),
@@ -50,6 +52,7 @@ class SessionEventWriter:
         )
 
     def append_session_created(self, **metadata: Any) -> None:
+        """写入会话起始元数据，并附上事件 schema 版本；这不是 provider 聊天消息。"""
         payload = {"session_id": self.session_id}
         payload.update(metadata_without_reserved_keys(metadata))
         payload["context_event_schema_version"] = CONTEXT_EVENT_SCHEMA_VERSION
@@ -70,6 +73,7 @@ class SessionEventWriter:
         self.append_event("agent_turn_telemetry", dict(payload))
 
     def append_message_part_metadata_updated(self, *, message_id: str, part_id: str, metadata: dict[str, Any]) -> None:
+        """追加 part 元数据补丁，不重写原消息；store 重放时将补丁合并到目标 part。"""
         self.append_event(
             "message_part_metadata_updated",
             {
@@ -88,6 +92,7 @@ class SessionEventWriter:
         provider: str,
         model: str,
     ) -> None:
+        """记录某次成功 provider 请求实际看见的工具结果 parts，用于上下文消费追踪。"""
         normalized = sorted({part_id for part_id in part_ids if part_id})
         if not normalized:
             return
@@ -110,6 +115,7 @@ class SessionEventWriter:
         metadata: dict[str, Any] | None = None,
         part_metadata: dict[str, Any] | None = None,
     ) -> str:
+        """递增用户 turn，生成消息 ID，并将正文和已暂存附件封装为 parts 后追加事件。"""
         self.current_turn += 1
         message_id = new_message_id()
         parts = [
@@ -151,6 +157,7 @@ class SessionEventWriter:
         return message_id
 
     def append_assistant_response(self, response: ChatResponse) -> str:
+        """把模型文本和工具调用拆成 assistant parts，同时记录 provider/model/finish_reason。"""
         message_id = new_message_id()
         parts: list[MessagePart] = []
         if response.content:
@@ -198,6 +205,7 @@ class SessionEventWriter:
         return message_id
 
     def append_tool_result(self, *, tool_call: ToolCall, result: ToolResult) -> str:
+        """追加一条 role=tool 事件，并保存 tool_call_id 以和 assistant 请求准确配对。"""
         message_id = new_message_id()
         part = MessagePart(
             id=new_part_id(),
@@ -231,6 +239,7 @@ class SessionEventWriter:
         target_tokens: int,
         event: CompactionEvent,
     ) -> None:
+        """记录规则/本地压缩结果及替换映射；store 重放该事件时会更新对应历史 parts。"""
         event_payload = asdict(event)
         self.append_event(
             "compaction_completed",
@@ -256,6 +265,7 @@ class SessionEventWriter:
         target_tokens: int,
         event: LlmCompactEvent,
     ) -> None:
+        """记录 LLM 摘要压缩结果；与普通 compaction 使用不同事件类型和结果字段。"""
         event_payload = asdict(event)
         created_at = utc_now_iso()
         self.append_event(
@@ -276,6 +286,7 @@ class SessionEventWriter:
         )
 
     def append_compaction_skipped(self, *, trigger: str, input_fingerprint: str, reason: str) -> None:
+        """记录本次为何未压缩，便于之后判断是预算无需压缩还是压缩条件不满足。"""
         self.append_event(
             "compaction_skipped",
             {
@@ -288,6 +299,7 @@ class SessionEventWriter:
         )
 
     def append_task_boundary_observation(self, observation: TaskBoundaryObservation) -> None:
+        """把任务边界识别结果转换为 session 事件，供运行状态恢复和上下文标记使用。"""
         event = TaskBoundaryService().to_event(session_id=self.session_id, observation=observation)
         self.store.append_event(event)
 
@@ -371,6 +383,7 @@ class SessionEventWriter:
         parts: list[MessagePart],
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """统一序列化 user/assistant/tool 消息事件，避免各调用点拼出不同 payload。"""
         self.append_event(
             event_type,
             {
@@ -381,17 +394,20 @@ class SessionEventWriter:
         )
 
     def _part_metadata(self, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        """复制传入 metadata，并为新 part 补当前 turn 标记；调用方提供的值优先保留。"""
         merged = dict(metadata or {})
         merged.setdefault("created_turn", self.current_turn)
         merged.setdefault("turn_id", self.current_turn)
         return merged
 
     def _attach_turn_metadata(self, parts: list[MessagePart]) -> None:
+        """给一批已经转换好的 parts 统一补 turn 元数据。"""
         for part in parts:
             part.metadata = self._part_metadata(part.metadata)
 
 
 def tool_call_to_part(*, message_id: str, tool_call: ToolCall) -> MessagePart:
+    """把 provider 的 ToolCall 转成持久化 part；ID、名称和参数保存在 metadata。"""
     return MessagePart(
         id=new_part_id(),
         message_id=message_id,

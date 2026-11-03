@@ -277,6 +277,11 @@ class AgentSession:
         return restored
 
     def persist_pending_permission_kind(self, *, tool_call_id: str, review_only: bool) -> None:
+        """把 pending 属于普通权限确认还是写前预览确认追加为 part 元数据事件。
+
+        只定位最近 assistant 消息中指定 tool_call_id，不重写整条历史；恢复 session 时，
+        可据此重建正确的确认界面和后续校验路径。
+        """
         view = self.rebuild_view()
         for message in reversed(view.messages):
             if message.role != "assistant":
@@ -297,6 +302,7 @@ class AgentSession:
         self,
         pending: PendingPermissionExecution | None = None,
     ) -> UserInputRequest | None:
+        """从当前 pending 状态重建可展示给 UI 的确认请求；不会执行或批准工具。"""
         pending = pending or self.pending_permission_execution
         if pending is None or self.permission_manager is None:
             return None
@@ -313,6 +319,7 @@ class AgentSession:
         return confirmation
 
     def append_session_created(self) -> None:
+        """追加 session_created 元数据事件，标记这份 append-only 日志的会话起点。"""
         self.writer.append_session_created()
 
     def build_system_prefix(
@@ -347,11 +354,12 @@ class AgentSession:
         return entry.messages
 
     def set_benchmark_task(self, task: str) -> None:
-        """Attach the current isolated benchmark task to the system prompt."""
+        """设置当前 benchmark 任务文本；后续 system prompt 会用它限定本次评测目标。"""
 
         self.benchmark_task = task.strip()
 
     def _skill_protocol(self) -> str:
+        """有 Skill 时返回使用规则；没有 Skill 时省去这段 system prompt。"""
         if not self.skill_catalog.skills:
             return ""
         return (
@@ -362,6 +370,7 @@ class AgentSession:
         )
 
     def _skill_catalog_summary(self) -> str:
+        """把已发现的 Skill 目录压成模型可见摘要；Skill 正文仍需按需加载。"""
         if not self.skill_catalog.skills:
             return ""
         return render_skill_catalog(self.skill_catalog)
@@ -416,6 +425,11 @@ class AgentSession:
         provider: str,
         model: str,
     ) -> None:
+        """记录成功模型请求实际看过的 tool_result parts，避免重复记录已消费事实。
+
+        part_ids 来自 ContextBuilder 对本次有效上下文的投影；projection_fingerprint 与
+        request_id 用于追踪具体请求。失败的 provider 请求不应调用此方法。
+        """
         new_ids = sorted(set(part_ids) - self.runtime_state.consumed_tool_result_part_ids)
         if not new_ids:
             return
@@ -470,6 +484,7 @@ class AgentSession:
         return resolved
 
     def _sync_sandbox_access_with_mode(self) -> None:
+        """令路径沙箱与 session 权限模式一致；BYPASS 放开范围，其余模式恢复项目根限制。"""
         if self.mode == PermissionMode.BYPASS.value:
             self.sandbox_access.mode = SandboxAccessMode.UNRESTRICTED
             self.permission_policy["path_access"] = "unrestricted"
@@ -559,6 +574,7 @@ class AgentSession:
 
     @property
     def current_turn(self) -> int:
+        """读取 writer 的用户 turn 计数；assistant/tool 消息不会增加这个计数。"""
         return self.writer.current_turn
 
     def rebuild_view(self):
@@ -567,6 +583,7 @@ class AgentSession:
         return self.store.rebuild_session_view(self.session_id)
 
     def _append_task_boundary_observation_if_present(self, *, tool_call: ToolCall, result: ToolResult) -> None:
+        """仅当 task_boundary 工具成功返回观察数据时，追加对应的任务边界事件。"""
         if tool_call.name != "task_boundary" or not result.ok:
             return
         observation = observation_from_tool_result_data(result.data)
@@ -574,6 +591,7 @@ class AgentSession:
             self.writer.append_task_boundary_observation(observation)
 
     def _current_context_metadata(self) -> dict[str, object]:
+        """返回写入当前消息/part 的上下文标签；无活动任务时不添加空标签。"""
         metadata: dict[str, object] = {}
         if self.runtime_state.active_task_hash:
             metadata["task_hash"] = self.runtime_state.active_task_hash
@@ -587,6 +605,12 @@ class AgentSession:
             part.metadata.update(metadata)
 
     def _pending_tool_calls_from_tail(self) -> list[tuple[ToolCall, list[ToolCall], bool | None]]:
+        """从历史尾部找尚无结果的 assistant 工具调用，用于崩溃后恢复权限等待。
+
+        只检查最后一条 assistant 消息及其之后的 tool 消息；如果尾部出现其他角色、
+        没有 tool_call 或调用已全部结算，则不构造 pending。返回首个未结算调用、同批
+        其余未结算调用和可能持久化的 review_only 标记。
+        """
         messages = self.rebuild_view().messages
         if not messages:
             return []
@@ -629,6 +653,7 @@ class AgentSession:
 
 
 def _tool_call_from_part(part: MessagePart) -> ToolCall:
+    """从持久化的 assistant tool_call part 重建 provider 无关的 ToolCall。"""
     arguments = deepcopy(part.metadata.get("arguments", {}))
     return ToolCall(
         id=str(part.metadata["tool_call_id"]),
@@ -665,10 +690,12 @@ def create_project_permission_manager(
     grants: PermissionGrantStore | None = None,
     mode: PermissionMode = PermissionMode.STANDARD,
 ) -> PermissionManager:
+    """以项目根目录创建默认权限管理器；调用方可注入持久授权存储和模式。"""
     return PermissionManager(policy=DefaultPermissionPolicy(project_root), grants=grants, mode=mode)
 
 
 def _task_boundary_required_stable_count(permission_manager: PermissionManager | None) -> int:
+    """决定任务边界判定需要的稳定次数；BYPASS benchmark 降为一次，其余默认两次。"""
     if permission_manager is not None and permission_manager.mode == PermissionMode.BYPASS:
         return 1
     return 2

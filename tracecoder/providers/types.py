@@ -142,9 +142,11 @@ class MainRequestOptions:
     extra_body: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """复制调用方传入的扩展参数，避免后续外部修改影响已保存的请求选项。"""
         object.__setattr__(self, "extra_body", deepcopy(dict(self.extra_body)))
 
     def as_chat_request_kwargs(self) -> dict[str, Any]:
+        """转成 ChatRequest 可直接展开的关键字参数，并复制 extra_body 保持隔离。"""
         return {
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,

@@ -16,6 +16,7 @@ class ToolRegistry:
     """
 
     def __init__(self, tools: list[Tool] | None = None) -> None:
+        """创建名称索引，并按顺序注册初始工具；重复名称会由 register 拒绝。"""
         self._tools: dict[str, Tool] = {}
         for tool in tools or []:
             self.register(tool)

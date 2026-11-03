@@ -35,6 +35,11 @@ class ContextBuilder:
         checkpoint: Checkpoint | None = None,
         store_root: Path | None = None,
     ) -> list[ChatMessage]:
+        """把 SessionView 转成某次模型请求的消息列表，不修改已保存的会话事实。
+
+        应用顺序：system 前缀 -> checkpoint 摘要 -> 有效 tail -> 工具配对校验 ->
+        裁剪提示 -> 按 role 投影。附件图片只在这里从 session store 读取并编码。
+        """
         active_checkpoint = checkpoint or CheckpointIndex(view.checkpoints).latest()
         messages = list(system_prefix or [])
         if active_checkpoint is not None:
@@ -64,7 +69,7 @@ class ContextBuilder:
         return messages
 
     def projected_tool_result_part_ids(self, view: SessionView) -> tuple[str, ...]:
-        """Return tool results that are visible in the effective provider tail."""
+        """返回本次有效上下文 tail 中可见的 tool_result part ID，供消费追踪使用。"""
 
         checkpoint = CheckpointIndex(view.checkpoints).latest()
         tail = _collapse_identical_adjacent_duplicate_tool_calls(
@@ -85,6 +90,11 @@ class ContextBuilder:
         *,
         checkpoint: Checkpoint | None,
     ) -> list[AgentMessage]:
+        """选择要发给模型的原始消息区间；有 checkpoint 时只取 tail 起点之后的消息。
+
+        checkpoint 不删除旧消息，只让旧历史由摘要代表。若 tail 起点不存在或切在孤立
+        tool result 上，明确报边界错误，避免生成 provider 无法接受的序列。
+        """
         if checkpoint is None:
             return view.messages
 
@@ -106,6 +116,11 @@ class ContextBuilder:
         preserve_trimmed_text: bool = False,
         store_root: Path | None = None,
     ) -> list[ChatMessage]:
+        """按内部 role 将一个 AgentMessage 投影为零条或多条 provider ChatMessage。
+
+        system_meta 不外发；assistant 合并文本和工具调用；tool 保留调用 ID；user 处理
+        可见文本、上下文锚点和附件。零条表示该消息当前对模型不可见。
+        """
         if message.role == "system_meta":
             # system_meta 是内部状态，不应该作为普通对话消息发给 provider。
             return []
@@ -173,6 +188,7 @@ def _project_tool_part(part: MessagePart) -> ChatMessage:
 
 
 def _validate_tail_boundary(messages: list[AgentMessage]) -> None:
+    """保证 checkpoint tail 不从 role=tool 开始，否则结果会失去前置 tool_call。"""
     if not messages:
         return
     first = messages[0]
@@ -183,14 +199,17 @@ def _validate_tail_boundary(messages: list[AgentMessage]) -> None:
 
 
 def _join_visible_text(parts: list[MessagePart], *, preserve_trimmed_text: bool = False) -> str:
+    """按 part 类型和 compaction 标记拼接可见文本；保留策略用于当前用户消息。"""
     return "\n".join(part.content for part in parts if part.kind in {"text", "file", "archive_placeholder"} and (preserve_trimmed_text or _is_visible_text_part(part)) and part.content)
 
 
 def _has_trimmed_text(messages: list[AgentMessage]) -> bool:
+    """检测 tail 是否含被压缩隐藏的文本，以便给模型加入统一的历史裁剪提示。"""
     return any(part.kind == "text" and part.metadata.get("compaction_state") == "trimmed" for message in messages for part in message.parts)
 
 
 def _is_visible_text_part(part: MessagePart) -> bool:
+    """判断 part 是否仍保留原文；trimmed 文本只在特定当前消息规则下恢复可见。"""
     return part.metadata.get("compaction_state") != "trimmed"
 
 
@@ -214,6 +233,7 @@ def _collapse_identical_adjacent_duplicate_tool_calls(messages: list[AgentMessag
 
 
 def _duplicate_tool_call_signature(message: AgentMessage) -> tuple[tuple[str, ...], tuple[tuple[str, str, object], ...]] | None:
+    """为可安全折叠的 assistant 调用批次生成签名；普通消息或信息不完整时返回 None。"""
     if message.role != "assistant":
         return None
     text = tuple(part.content for part in message.parts if part.kind == "text")
@@ -234,6 +254,7 @@ def _duplicate_tool_call_signature(message: AgentMessage) -> tuple[tuple[str, ..
 
 
 def _with_basis_message_id(message_id: str, content: str) -> str:
+    """将内部消息锚点附在 user 文本前，供 task_boundary 工具引用真实消息。"""
     return f"[context: basis_message_id={message_id}]\n{content}"
 
 
@@ -274,6 +295,7 @@ def _project_user_content_parts(
 
 
 def _attachment_path(part: MessagePart, *, store_root: Path | None) -> Path | None:
+    """解析 session 相对附件路径，并拒绝逃出 store 根目录或已不存在的文件。"""
     relative_path = part.metadata.get("path")
     if store_root is None or not isinstance(relative_path, str):
         return None

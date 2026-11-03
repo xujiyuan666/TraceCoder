@@ -50,6 +50,7 @@ class ChatProvider(ABC):
         """
 
         async def unsupported_stream() -> AsyncIterator[ChatStreamEvent]:
+            """默认拒绝流式请求；使用异步生成器让错误在消费事件时按统一语义抛出。"""
             for event in ():
                 yield event
             raise ProviderError(

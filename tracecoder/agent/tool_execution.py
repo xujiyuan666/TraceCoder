@@ -120,6 +120,12 @@ class ToolExecutor:
         background_manager: BackgroundJobManager | None = None,
         background_tool_names: frozenset[str] | None = None,
     ) -> None:
+        """装配单个 AgentSession 的工具批次执行器。
+
+        loop 注入取消、校验、遥测和 UI 事件回调；session 提供注册表与结果落盘；可选
+        BackgroundJobManager 负责异步任务。执行器统一安排权限预检、串行/并行/后台分流，
+        并保证每个原始 tool_call 最终都有匹配的 tool_result。
+        """
         self.session = session
         self.settlement = settlement
         self._emit_event = emit_event
@@ -223,7 +229,7 @@ class ToolExecutor:
         return state
 
     async def execute_interactive_async(self, tool_calls: list[ToolCall]) -> ToolExecutionState:
-        """Run the shared synchronous state machine without blocking the stream loop."""
+        """在线程中运行同一套同步执行状态机，避免工具批次阻塞 stream 事件循环。"""
 
         return await anyio.to_thread.run_sync(self.execute_interactive, tool_calls)
 
@@ -304,9 +310,11 @@ class ToolExecutor:
         trusted = ToolCall(id=tool_call.id, name=tool_call.name, arguments=trusted_arguments)
 
         def run() -> ToolResult:
+            """交给后台线程执行已预检的 tool_call，参数使用前面冻结的 trusted 副本。"""
             return self.session.execute_tool_call_after_permission_confirmation(trusted)
 
         def complete_task_plan(job: BackgroundJob) -> str | None:
+            """后台成功时按启动时记录的 revision 尝试推进关联计划任务。"""
             if job.task_id is not None:
                 return self._mark_background_task_completed(
                     job.task_id,
@@ -334,9 +342,15 @@ class ToolExecutor:
         return make_background_placeholder_result(job)
 
     def _task_plan_service(self) -> TaskPlanService:
+        """创建绑定当前 session 日志与 writer 的 TaskPlan 服务。"""
         return TaskPlanService(store=self.session.store, writer=self.session.writer)
 
     def _validate_background_task_id(self, tool_name: str, task_id: str | None) -> int | ToolResult | None:
+        """校验后台任务引用的 TaskPlan ID；成功返回观察到的 revision，失败返回 ToolResult。
+
+        revision 随 job 保存，任务完成时用它检测期间是否发生了计划变更，避免后台结果
+        覆盖主 Agent 后续对任务状态的决定。
+        """
         if task_id is None:
             return None
         plan = self._task_plan_service().current()
@@ -392,18 +406,21 @@ class ToolExecutor:
         return f"TaskPlan task {task_id!r} was not updated because the plan changed concurrently."
 
     def _delegate_call_allows_background(self, tool_call: ToolCall) -> bool:
+        """只允许 profile 声明支持后台运行的 delegate 角色进入后台队列。"""
         arguments = tool_call.arguments
         if not isinstance(arguments, dict):
             return False
         return role_allows_background(str(arguments.get("role") or ""))
 
     def _delegate_call_requires_worktree(self, tool_call: ToolCall) -> bool:
+        """判断该 delegate 角色是否会修改文件、因而必须使用隔离 worktree。"""
         arguments = tool_call.arguments
         if not isinstance(arguments, dict):
             return False
         return role_requires_worktree(str(arguments.get("role") or ""))
 
     def _worktree_isolation_available(self) -> bool:
+        """检查当前项目是否有权限管理器提供的 Git 根目录且可创建 worktree。"""
         manager = self.session.permission_manager
         if manager is None:
             return False
@@ -452,6 +469,11 @@ class ToolExecutor:
         state: ToolExecutionState,
         skipped_tool_calls: list[ToolCall] | None = None,
     ) -> UserInputRequest | None:
+        """观察并持久化一个工具结果，处理工具触发的用户交互与任务边界副作用。
+
+        返回 UserInputRequest 表示工具结果要求暂停（例如 ask_user）；此时同批后续调用
+        必须记为 skipped。普通结果返回 None，执行批次可以继续。
+        """
         # 观察器可以在事实落库前给结果补充一次性 agent guidance；执行成功/失败本身
         # 仍由原始 ToolResult 决定，观察器不得绕过权限或再次执行工具。
         if self._observe_tool_result is not None:
@@ -471,12 +493,14 @@ class ToolExecutor:
         return None
 
     def parallel_readonly_batch_end(self, tool_calls: list[ToolCall], start: int) -> int:
+        """从 start 向后找连续可并行的只读调用区间，返回右开边界索引。"""
         end = start
         while end < len(tool_calls) and self.can_execute_in_parallel(tool_calls[end]):
             end += 1
         return end
 
     def can_execute_in_parallel(self, tool_call: ToolCall) -> bool:
+        """判断调用能否进入只读并行批次；后台请求、需预览写入和需询问权限的调用排除。"""
         if self.requires_bypass_prewrite_review(tool_call):
             return False
         if tool_call.id in self._background_request:
@@ -488,15 +512,18 @@ class ToolExecutor:
         return preflight is None or preflight.decision.kind == PermissionDecisionKind.ALLOW
 
     def parallel_tool_names_for_current_mode(self) -> frozenset[str]:
+        """根据权限模式选择可安全并行的工具白名单。"""
         if self.session.permission_manager is not None and self.session.permission_manager.mode == PermissionMode.BYPASS:
             return BYPASS_PARALLEL_TOOL_NAMES
         return PARALLEL_READONLY_TOOL_NAMES
 
     def requires_prewrite_review(self, tool_call: ToolCall) -> bool:
+        """判断普通权限模式下，该变更工具是否必须先生成可审阅的修改预览。"""
         manager = self.session.permission_manager
         return self.session.require_prewrite_review and (manager is None or manager.mode != PermissionMode.BYPASS) and supports_prewrite_review(tool_call.name)
 
     def requires_bypass_prewrite_review(self, tool_call: ToolCall) -> bool:
+        """即使 BYPASS 模式也判断是否要预览支持预览的变更，供并行路径排除此类操作。"""
         manager = self.session.permission_manager
         return (
             self.session.require_prewrite_review
@@ -512,6 +539,7 @@ class ToolExecutor:
         *,
         preflight,
     ) -> ToolResult | None:
+        """BYPASS 模式下执行变更前仍可生成预览；预览失败时返回失败结果阻止写入。"""
         if not self.requires_bypass_prewrite_review(tool_call):
             return None
         if preflight is None:
@@ -531,6 +559,7 @@ class ToolExecutor:
         return None
 
     def execute_single(self, tool_call: ToolCall) -> ToolResult:
+        """执行单个普通工具并发送 started/finished 事件；执行前后检查协作取消。"""
         self._check_cancelled()
         self._emit_event("started", tool_call)
         with cancellation_context(self.cancellation_token):
@@ -540,6 +569,7 @@ class ToolExecutor:
         return result
 
     def execute_parallel_readonly_batch(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
+        """用线程池并发执行已通过筛选的只读工具，按输入顺序返回结果列表。"""
         self._check_cancelled()
         for tool_call in tool_calls:
             self._emit_event("started", tool_call)
@@ -551,11 +581,13 @@ class ToolExecutor:
         return results
 
     def execute_with_cancellation_context(self, tool_call: ToolCall) -> ToolResult:
+        """在线程上下文中暴露本任务取消 token，再经 session 注册表执行工具。"""
         self._check_cancelled()
         with cancellation_context(self.cancellation_token):
             return self.session.execute_tool_call(tool_call)
 
     def execute_after_permission_with_cancellation_context(self, tool_call: ToolCall) -> ToolResult:
+        """执行已经批准的原始调用；跳过第二次权限询问，但仍保留取消上下文。"""
         self._check_cancelled()
         with cancellation_context(self.cancellation_token):
             return self.session.execute_tool_call_after_permission_confirmation(tool_call)
@@ -568,6 +600,11 @@ class ToolExecutor:
         skipped_tool_calls: list[ToolCall],
         review_only: bool = False,
     ) -> UserInputRequest | ToolResult:
+        """保存可信的原始调用和确认信息，返回 UI 请求；写前预览失败则返回 ToolResult。
+
+        UI payload 供展示和回传选择，不作为恢复时的参数来源。真实 tool_call 保存在
+        session.pending_permission_execution，保证用户批准后执行的正是原始请求。
+        """
         if self.session.permission_manager is None:
             raise RuntimeError("permission confirmation requires a permission manager")
 
@@ -613,6 +650,7 @@ class ToolExecutor:
         return confirmation
 
     def permission_input_request_from_pending(self, pending: PendingPermissionExecution) -> UserInputRequest:
+        """从恢复出的 pending 状态重新生成确认 UI 请求，包含原调用摘要和预览数据。"""
         confirmation = self.session.pending_permission_input_request(pending)
         if confirmation is None:
             raise RuntimeError("permission confirmation requires a pending request and permission manager")
