@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/tracecoder-logo.png" alt="TraceCoder logo" width="156">
+  <img src="assets/tracecoder-logo.png" alt="TraceCoder logo" width="320">
 </p>
 
 <h1 align="center">TraceCoder</h1>
